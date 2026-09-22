@@ -1,4 +1,4 @@
-/* Flow — compact status dashboard inspired by modern uptime panels. */
+/* Orbit — an original dark-first operations console. */
 @import "tailwindcss" source(none);
 @source "../index.html";
 @source "../src";
@@ -8,13 +8,13 @@
 
 :root {
   --radius: 0.75rem;
-  --background: #f8fafc;
-  --foreground: #172033;
+  --background: #f4f7fb;
+  --foreground: #132238;
   --card: #ffffff;
-  --card-foreground: #172033;
+  --card-foreground: #132238;
   --popover: #ffffff;
   --popover-foreground: #1e293b;
-  --primary: #0ea5e9;
+  --primary: #2563eb;
   --primary-foreground: #ffffff;
   --secondary: #f1f3f9;
   --secondary-foreground: #1e293b;
@@ -26,7 +26,7 @@
   --destructive-foreground: #ffffff;
   --border: #e2e8f0;
   --input: #e2e8f0;
-  --ring: #0ea5e9;
+  --ring: #2563eb;
   --chart-1: #3b82f6;
   --chart-2: #8b5cf6;
   --chart-3: #f97316;
@@ -41,9 +41,9 @@
   --foreground: #e2e8f0;
   --card: #111c2d;
   --card-foreground: #e2e8f0;
-  --popover: #1a1d27;
+  --popover: #101d30;
   --popover-foreground: #e2e8f0;
-  --primary: #38bdf8;
+  --primary: #60a5fa;
   --primary-foreground: #0f1117;
   --secondary: #252938;
   --secondary-foreground: #e2e8f0;
@@ -105,17 +105,19 @@
 
 body {
   background: var(--background);
-  background-image: radial-gradient(circle at 50% -20%, rgb(14 165 233 / 0.08), transparent 34rem);
+  background-image: linear-gradient(rgb(37 99 235 / 0.035) 1px, transparent 1px), linear-gradient(90deg, rgb(37 99 235 / 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
-.flow-node-card {
-  border-color: rgb(148 163 184 / 0.24);
+.orbit-panel {
+  border-color: rgb(148 163 184 / 0.22);
+  box-shadow: 0 18px 50px rgb(15 23 42 / 0.055);
 }
 
-@media (max-width: 639px) {
-  body { background-image: none; }
-  .flow-node-card { border-radius: 1rem; }
-}
+.dark body { background-image: linear-gradient(rgb(96 165 250 / 0.045) 1px, transparent 1px), linear-gradient(90deg, rgb(96 165 250 / 0.045) 1px, transparent 1px); }
+.dark .orbit-panel { border-color: rgb(148 163 184 / 0.13); box-shadow: 0 18px 50px rgb(0 0 0 / 0.18); }
+
+@media (max-width: 639px) { body { background-size: 24px 24px; } }
 
 .tnum { font-variant-numeric: tabular-nums; }
 

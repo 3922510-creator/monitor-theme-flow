@@ -1,10 +1,10 @@
-# Flow
+# Orbit
 
-> 参考现代 uptime 面板的清爽响应式 monitor 状态面板主题
+> 深色优先的运维控制台状态监控主题
 
 ![preview](preview.png)
 
-Flow 是 [monitor](https://github.com/monitor-probe/monitor) 的第三方主题，基于 [monitor-theme-default](https://github.com/monitor-probe/monitor-theme-default) 改造，重点优化手机、平板和桌面端的自适应布局。
+Orbit 是 [monitor](https://github.com/monitor-probe/monitor) 的第三方主题，基于 [monitor-theme-default](https://github.com/monitor-probe/monitor-theme-default) 改造，重点优化手机、平板和桌面端的自适应布局。
 
 清爽灰白背景 + 蓝色状态强调，紧凑信息卡片，移动端单列、平板双列、桌面多列自适应，支持深色模式。
 
