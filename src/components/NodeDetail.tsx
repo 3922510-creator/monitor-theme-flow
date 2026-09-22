@@ -1,43 +1,490 @@
-import { ArrowDown, ArrowLeft, ArrowUp, CalendarDays, CheckCircle2, Clock3, Cpu, HardDrive, MemoryStick, Network, RefreshCw, Server, Wallet } from "lucide-react"
-import { Meter } from "@/components/Meter"
-import { type Node } from "@/lib/api"
-import { bytes, daysUntil, osName, percent, rate, uptime } from "@/lib/format"
-import { cn } from "@/lib/utils"
+import { useEffect, useMemo, useState } from "react"
+import { median } from "d3-array"
+import {
+  Area, AreaChart, Brush, CartesianGrid, ComposedChart, Line, LineChart, ResponsiveContainer,
+  Tooltip, XAxis, YAxis,
+} from "recharts"
+import {
+  ArrowDownUp, Cpu, HardDrive, MemoryStick, Server, Wallet,
+} from "lucide-react"
 
-function code(value: string) { const v = value.trim().toUpperCase(); return /^[A-Z]{2}$/.test(v) ? v : "" }
-function usage(node: Node) {
-  if (node.traffic_mode === "up") return node.month_tx
-  if (node.traffic_mode === "down") return node.month_rx
-  if (node.traffic_mode === "max") return Math.max(node.month_rx, node.month_tx)
-  return node.month_rx + node.month_tx
+import { Badge } from "@/components/ui/badge"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Country, Status } from "@/components/NodeCard"
+import { api, type Node } from "@/lib/api"
+import {
+  axisBytes, axisTop, bytes, clockFor, quarters, cpuName, CYCLES, FOREVER, money, osName, rate, timeTicks,
+} from "@/lib/format"
+
+type Point = {
+  ts: number
+  cpu: number
+  mem_used: number
+  disk_used: number
+  net_rx: number
+  net_tx: number
 }
-function Section({ title, icon: Icon, children }: { title: string; icon: typeof Server; children: React.ReactNode }) {
-  return <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-5"><h3 className="mb-4 flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white"><Icon className="size-4 text-sky-500" />{title}</h3>{children}</section>
+type PingPoint = {
+  task_id: number
+  ts: number
+  latency: number | null
+  band?: [number, number]
+  loss?: number
 }
-function Fact({ label, value }: { label: string; value: string }) {
-  return <div className="min-w-0"><dt className="text-[11px] text-slate-400">{label}</dt><dd className="mt-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-200">{value || "—"}</dd></div>
+type Probes = Record<string, string>
+type Loss = Record<string, number>
+
+const RANGES = [
+  { hours: 1, label: "1 小时" },
+  { hours: 6, label: "6 小时" },
+  { hours: 24, label: "24 小时" },
+  { hours: 168, label: "7 天" },
+]
+
+const RANGES_FOR = {
+  resources: RANGES,
+  latency: RANGES.filter((r) => r.hours <= 24),
 }
 
-export function NodeDetail({ node, onBack }: { node: Node; onBack: () => void }) {
-  const m = node.metrics
-  const traffic = node.traffic_limit > 0 ? percent(usage(node), node.traffic_limit) : null
-  const days = daysUntil(node.expires_at)
+const AXIS = { stroke: "currentColor", fontSize: 11, tickLine: false, axisLine: false }
+
+const SERIES = { dot: false as const, strokeWidth: 1.5, isAnimationActive: false }
+
+const Y_WIDTH = 68
+
+const PALETTE = [
+  { stroke: "#ec4899", dash: undefined },
+  { stroke: "#ca8a04", dash: "6 3" },
+  { stroke: "#0891b2", dash: "2 3" },
+  { stroke: "#8b5cf6", dash: "10 4 2 4" },
+  { stroke: "#059669", dash: "1 4" },
+]
+
+const TABS = [
+  { key: "resources", label: "资源" },
+  { key: "latency", label: "网络延迟" },
+] as const
+
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-4 pb-6">
-      <button onClick={onBack} className="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 transition-colors hover:text-sky-600"><ArrowLeft className="size-4" />返回服务器列表</button>
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex flex-wrap items-start gap-4 border-b border-slate-100 p-5 dark:border-slate-800 sm:p-7">
-          <span className={cn("mt-2 size-3 shrink-0 rounded-full ring-4", node.online ? "bg-emerald-500 ring-emerald-500/10" : "bg-slate-300 ring-slate-300/10")} />
-          <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h1 className="truncate text-xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-2xl">{node.name}</h1>{node.country && <span className="rounded bg-sky-50 px-2 py-1 text-xs font-bold text-sky-700 dark:bg-sky-950/50 dark:text-sky-300">{code(node.country)}</span>}</div><p className="mt-2 text-xs text-slate-400">{node.os ? osName(node.os) : "Unknown"}{node.arch ? ` · ${node.arch}` : ""}{node.virt && node.virt !== "none" ? ` · ${node.virt}` : ""}{node.remark ? ` · ${node.remark}` : ""}</p></div>
-          <span className={cn("rounded-full px-3 py-1.5 text-xs font-semibold", node.online ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400" : "bg-slate-100 text-slate-500 dark:bg-slate-800")}>{node.online ? "在线" : "离线"}</span>
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-5">
+      <h4 className="mb-3 text-base font-bold text-foreground">{title}</h4>
+      <div className="h-52 w-full text-muted-foreground sm:h-64">{children}</div>
+    </div>
+  )
+}
+
+function Tab({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+        active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function despike(points: PingPoint[], window = 7, sigmas = 3): PingPoint[] {
+  const half = window >> 1
+  return points.map((p, i) => {
+    if (p.latency === null) return p
+    const near = points
+      .slice(Math.max(0, i - half), i + half + 1)
+      .map((x) => x.latency)
+      .filter((v) => v !== null)
+    const mid = median(near) ?? p.latency
+    const mad = median(near.map((v) => Math.abs(v - mid))) ?? 0
+    const outlier = mad > 0 && Math.abs(p.latency - mid) > sigmas * 1.4826 * mad
+    return outlier ? { ...p, latency: mid } : p
+  })
+}
+
+function Fact({ label, value, icon: Icon }: { label: string; value?: string | number | null; icon?: typeof Server }) {
+  if (value === null || value === undefined || value === "") return null
+  return (
+    <div className="rounded-lg border border-border bg-card/60 px-3 py-2.5">
+      <dt className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {Icon && <Icon className="size-3.5" />}
+        {label}
+      </dt>
+      <dd className="tnum mt-1 truncate text-sm font-medium">{value}</dd>
+    </div>
+  )
+}
+
+export function NodeDetail({ node, onBack }: { node: Node; onBack?: () => void }) {
+  const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("resources")
+  const [ranges, setRanges] = useState({ resources: 6, latency: 24 })
+  const hours = ranges[tab]
+  const [smooth, setSmooth] = useState(false)
+  const [breakLine, setBreakLine] = useState(false)
+  const [hiddenProbes, setHiddenProbes] = useState<number[]>([])
+  const [data, setData] = useState<{ metrics: Point[]; ping: PingPoint[]; probes: Probes; loss?: Loss } | null>(null)
+  const [failed, setFailed] = useState("")
+  const [zoom, setZoom] = useState<[number, number] | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setData(null)
+    setZoom(null)
+    setFailed("")
+    const points = Math.round(globalThis.innerWidth * (globalThis.devicePixelRatio || 1))
+    const series = tab === "resources" ? "metrics" : "ping"
+    api<{ metrics: Point[]; ping: PingPoint[]; probes: Probes; loss?: Loss }>(
+      `/nodes/${node.id}/metrics?hours=${hours}&points=${points}&series=${series}`,
+    )
+      .then((next) => { if (active) setData(next) })
+      .catch((e: Error) => {
+        if (active) { setFailed(e.message || "网络错误"); setData({ metrics: [], ping: [], probes: {} }) }
+      })
+    return () => { active = false }
+  }, [node.id, hours, tab])
+
+  const m = node.metrics
+  const pingSeries = useMemo(
+    () =>
+      [...new Set((data?.ping ?? []).map((p) => p.task_id))]
+        .map((id) => {
+          const points = (data?.ping ?? []).filter((p) => p.task_id === id)
+          const loss = data?.loss?.[id] ?? 0
+          return { id, name: data?.probes?.[id] ?? `探测 ${id}`, points, loss }
+        })
+        .filter((s) => s.points.length > 0),
+    [data],
+  )
+
+  const metricRows = useMemo(
+    () => (data?.metrics ?? []).map((m) => ({ ...m, ts: m.ts * 1_000 })),
+    [data],
+  )
+
+  const tops = useMemo(() => {
+    const max = (pick: (m: Point) => number) =>
+      metricRows.reduce((hi, m) => Math.max(hi, pick(m)), 0)
+    return {
+      cpu: axisTop(max((m) => m.cpu), 4, 10, 100),
+      rate: axisTop(max((m) => Math.max(m.net_rx, m.net_tx)), 1024, 1024),
+    }
+  }, [metricRows])
+
+  const shownProbes = useMemo(
+    () => pingSeries.filter((s) => !hiddenProbes.includes(s.id)),
+    [pingSeries, hiddenProbes],
+  )
+  const style = (id: number) => PALETTE[pingSeries.findIndex((p) => p.id === id) % PALETTE.length]
+
+  const pingRows = useMemo(() => {
+    const rows = new Map<
+      number,
+      { ts: number } & Record<string, number | [number, number] | null>
+    >()
+    for (const s of pingSeries) {
+      const smoothed = despike(s.points)
+      s.points.forEach((p, i) => {
+        const row = rows.get(p.ts) ?? { ts: p.ts * 1_000 }
+        row[`t${s.id}`] = p.latency
+        row[`s${s.id}`] = smoothed[i].latency
+        row[`l${s.id}`] = p.loss ?? 0
+        row[`b${s.id}`] = p.band ?? null
+        rows.set(p.ts, row)
+      })
+    }
+    return [...rows.values()].sort((a, b) => a.ts - b.ts)
+  }, [pingSeries])
+
+  const timeAxis = (rows: { ts: number }[], from = 0, to = rows.length - 1) => ({
+    dataKey: "ts",
+    type: "number" as const,
+    domain: ["dataMin", "dataMax"] as const,
+    ticks: rows.length ? timeTicks(rows[from].ts, rows[to].ts) : undefined,
+    tickFormatter: clockFor(hours),
+    minTickGap: hours > 24 ? 72 : 40,
+    ...AXIS,
+  })
+
+  return (
+    <div className="flow-detail space-y-5">
+      <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:px-6">
+        {onBack && <button onClick={onBack} className="mr-1 rounded-lg px-2 py-1 text-sm text-slate-500 transition-colors hover:bg-muted hover:text-foreground">‹ 返回总览</button>}
+        <h2 className="truncate text-xl font-bold tracking-tight">{node.name}</h2>
+        <Country node={node} />
+        <Status node={node} />
+        {node.agent_version && (
+          <Badge variant="outline" className="font-normal">
+            agent {node.agent_version}
+          </Badge>
+        )}
+      </div>
+
+      <dl className="grid gap-px overflow-hidden rounded-2xl border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-3 dark:border-slate-800 dark:bg-slate-800">
+        <Fact label="系统" icon={Server} value={[osName(node.os), node.kernel].filter(Boolean).join(" · ")} />
+        <Fact
+          label="CPU"
+          icon={Cpu}
+          value={node.cpu_name ? `${cpuName(node.cpu_name)} × ${node.cpu_cores}` : `${node.cpu_cores} 核`}
+        />
+        <Fact label="内存 / 硬盘" icon={MemoryStick} value={`${bytes(node.mem_total)} / ${bytes(node.disk_total)}`} />
+        <Fact
+          label="架构"
+          icon={HardDrive}
+          value={[node.arch, node.virt !== "none" ? node.virt : "", m ? `${m.procs} 进程` : ""]
+            .filter(Boolean)
+            .join(" · ")}
+        />
+        <Fact label="今日流量" icon={ArrowDownUp} value={`↓ ${bytes(node.day_rx)} · ↑ ${bytes(node.day_tx)}`} />
+        <Fact
+          label="续费"
+          icon={Wallet}
+          value={[
+            node.price > 0
+              ? `${money(node.price, node.currency)} / ${CYCLES[node.billing_cycle] ?? node.billing_cycle}`
+              : "免费",
+            node.expires_at ? `${node.expires_at} 到期` : FOREVER,
+          ].join(" · ")}
+        />
+      </dl>
+
+      {node.remark && (
+        <div className="flex items-center gap-2">
+          <span className="rounded-full bg-linear-to-r from-blue-50 to-violet-50 px-3 py-1 text-xs font-medium text-violet-600 dark:from-blue-950/50 dark:to-violet-950/50 dark:text-violet-400">
+            {node.remark}
+          </span>
         </div>
-        <dl className="grid grid-cols-2 gap-x-5 gap-y-5 p-5 sm:grid-cols-3 sm:p-7 lg:grid-cols-6">
-          <Fact label="系统" value={osName(node.os)} /><Fact label="架构" value={node.arch} /><Fact label="处理器" value={`${node.cpu_cores} 核`} /><Fact label="虚拟化" value={node.virt === "none" ? "—" : node.virt} /><Fact label="Agent" value={node.agent_version} /><Fact label="在线时长" value={m ? uptime(m.uptime) : "—"} />
-        </dl>
-      </section>
-      {m && <Section title="资源使用" icon={Server}><div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4"><Meter label={`CPU · ${node.cpu_cores} 核`} icon={<Cpu className="size-3" />} pct={m.cpu} foot={`负载 ${m.load[0].toFixed(2)} / ${m.load[1].toFixed(2)} / ${m.load[2].toFixed(2)}`} color="bg-sky-400" /><Meter label="内存" icon={<MemoryStick className="size-3" />} pct={percent(m.mem_used, m.mem_total)} foot={`${bytes(m.mem_used)} / ${bytes(m.mem_total)}`} color="bg-violet-400" /><Meter label="磁盘" icon={<HardDrive className="size-3" />} pct={percent(m.disk_used, m.disk_total)} foot={`${bytes(m.disk_used)} / ${bytes(m.disk_total)}`} color="bg-amber-400" /><Meter label="Swap" icon={<RefreshCw className="size-3" />} pct={m.swap_total ? percent(m.swap_used, m.swap_total) : null} empty="无" color="bg-cyan-400" /></div></Section>}
-      <div className="grid gap-4 lg:grid-cols-2"><Section title="实时网络" icon={Network}><div className="grid grid-cols-2 gap-3"><div className="rounded-xl bg-emerald-50 p-4 dark:bg-emerald-950/30"><ArrowUp className="size-4 text-emerald-500" /><p className="mt-3 text-xs text-slate-400">上行</p><strong className="mt-1 block text-xl text-emerald-600 dark:text-emerald-400">{m ? rate(m.net_tx) : "—"}</strong></div><div className="rounded-xl bg-sky-50 p-4 dark:bg-sky-950/30"><ArrowDown className="size-4 text-sky-500" /><p className="mt-3 text-xs text-slate-400">下行</p><strong className="mt-1 block text-xl text-sky-600 dark:text-sky-400">{m ? rate(m.net_rx) : "—"}</strong></div></div><div className="mt-4 grid grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-xs dark:border-slate-800"><Fact label="今日上行" value={bytes(node.day_tx)} /><Fact label="今日下行" value={bytes(node.day_rx)} /></div></Section><Section title="流量与服务" icon={Wallet}><div className="grid grid-cols-2 gap-x-5 gap-y-5"><Fact label="总上行" value={bytes(node.total_tx)} /><Fact label="总下行" value={bytes(node.total_rx)} /><Fact label="周期用量" value={`${bytes(usage(node))} / ${node.traffic_limit > 0 ? bytes(node.traffic_limit) : "∞"}`} /><Fact label="流量进度" value={traffic === null ? "无限流量" : `${traffic.toFixed(1)}%`} /><Fact label="到期时间" value={days === null ? "—" : days < 0 ? `已过期${-days}天` : `${days}天`} /><Fact label="计费周期" value={node.billing_cycle || "—"} /></div>{traffic !== null && <div className="mt-5 flex gap-1">{Array.from({ length: 24 }, (_, i) => <i key={i} className={cn("h-2 flex-1 rounded-full", i < Math.round(traffic / 100 * 24) ? "bg-sky-400" : "bg-slate-100 dark:bg-slate-800")} />)}</div>}</Section></div>
-      <div className="grid gap-4 sm:grid-cols-3"><div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><CheckCircle2 className="size-5 text-emerald-500" /><div><p className="text-xs text-slate-400">状态</p><strong className="text-sm">{node.online ? "服务正常" : "服务离线"}</strong></div></div><div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><Clock3 className="size-5 text-sky-500" /><div><p className="text-xs text-slate-400">最后上报</p><strong className="text-sm">{node.last_seen ? new Date(node.last_seen * 1000).toLocaleString("zh-CN") : "—"}</strong></div></div><div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><CalendarDays className="size-5 text-violet-500" /><div><p className="text-xs text-slate-400">到期提醒</p><strong className="text-sm">{days === null ? "无设置" : days > 0 ? `${days} 天后` : "需关注"}</strong></div></div></div>
+      )}
+
+      <div className="space-y-2 border-t border-violet-500/15 pt-4">
+        <div className="flex gap-1">
+          {TABS.map((t) => (
+            <Tab key={t.key} active={tab === t.key} onClick={() => setTab(t.key)}>
+              {t.label}
+            </Tab>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex gap-1">
+            {RANGES_FOR[tab].map((r) => (
+              <Tab
+                key={r.hours}
+                active={hours === r.hours}
+                onClick={() => setRanges((all) => ({ ...all, [tab]: r.hours }))}
+              >
+                {r.label}
+              </Tab>
+            ))}
+          </div>
+          {tab === "latency" && (
+            <>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={smooth}
+                  onChange={(e) => setSmooth(e.target.checked)}
+                  className="accent-foreground"
+                />
+                削峰平滑
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={breakLine}
+                  onChange={(e) => setBreakLine(e.target.checked)}
+                  className="accent-foreground"
+                />
+                断点连线
+              </label>
+            </>
+          )}
+        </div>
+      </div>
+
+      {!data ? (
+        <Skeleton className="h-40 w-full" />
+      ) : failed ? (
+        <p className="py-8 text-center text-sm text-destructive" role="alert">读取历史数据失败：{failed}</p>
+      ) : tab === "latency" ? (
+        pingSeries.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">这段时间没有延迟数据</p>
+        ) : (
+          <div className="space-y-4">
+            {/* Time series chart */}
+            <div className="h-72 w-full text-muted-foreground">
+              {shownProbes.length === 0 ? (
+                <p className="py-8 text-center text-sm">没有选中任何探测</p>
+              ) : (
+                <ResponsiveContainer>
+                  <ComposedChart data={pingRows}>
+                    <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
+                    <XAxis
+                      {...timeAxis(
+                        pingRows,
+                        Math.min(zoom?.[0] ?? 0, pingRows.length - 1),
+                        Math.min(zoom?.[1] ?? pingRows.length - 1, pingRows.length - 1),
+                      )}
+                    />
+                    <YAxis unit="ms" width={52} domain={["auto", "auto"]} {...AXIS} />
+                    <Tooltip
+                      labelFormatter={(ts) => new Date(Number(ts)).toLocaleString("zh-CN")}
+                      formatter={(v, name, item) => {
+                        const loss = Number(item?.payload?.[`l${String(item.dataKey).slice(1)}`] ?? 0)
+                        return [`${Number(v)} ms${loss > 0 ? ` · 丢 ${loss}%` : ""}`, name]
+                      }}
+                      contentStyle={{ fontSize: 12 }}
+                    />
+                    {shownProbes.length === 1 &&
+                      shownProbes.map((s) => (
+                        <Area
+                          key={`band${s.id}`}
+                          dataKey={`b${s.id}`}
+                          stroke="none"
+                          fill={style(s.id).stroke}
+                          fillOpacity={0.16}
+                          isAnimationActive={false}
+                          tooltipType="none"
+                          legendType="none"
+                          connectNulls={!breakLine}
+                        />
+                      ))}
+                    {shownProbes.map((s) => (
+                      <Line
+                        key={s.id}
+                        dataKey={`${smooth ? "s" : "t"}${s.id}`}
+                        name={s.name}
+                        stroke={style(s.id).stroke}
+                        strokeDasharray={style(s.id).dash}
+                        {...SERIES}
+                        connectNulls={!breakLine}
+                      />
+                    ))}
+                    <Brush
+                      dataKey="ts"
+                      height={28}
+                      travellerWidth={10}
+                      tickFormatter={clockFor(hours)}
+                      className="fill-muted"
+                      stroke="var(--color-muted-foreground)"
+                      onChange={(r) => setZoom([r.startIndex ?? 0, r.endIndex ?? pingRows.length - 1])}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* Probe filter chips */}
+            {(pingSeries.length > 1 || pingSeries.some((s) => s.loss > 0)) && (
+            <div className="flex flex-wrap items-center justify-center gap-1.5">
+              {pingSeries.map((s) => {
+                const shown = !hiddenProbes.includes(s.id)
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() =>
+                      setHiddenProbes((h) => (shown ? [...h, s.id] : h.filter((id) => id !== s.id)))
+                    }
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-opacity ${
+                      shown ? "" : "opacity-40"
+                    }`}
+                  >
+                    <svg width="14" height="6" className="shrink-0" aria-hidden>
+                      <line
+                        x1="0"
+                        y1="3"
+                        x2="14"
+                        y2="3"
+                        stroke={style(s.id).stroke}
+                        strokeDasharray={style(s.id).dash}
+                        strokeWidth="2"
+                      />
+                    </svg>
+                    {s.name}
+                    {s.loss > 0 && (
+                      <span className="tabular-nums opacity-60">
+                        丢 {s.loss < 1 ? "<1" : Math.round(s.loss)}%
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+            )}
+
+            <p className="text-xs text-muted-foreground">
+              网络延迟最近 {hours} 小时记录；超时的采样点留空。
+            </p>
+          </div>
+        )
+      ) : data.metrics.length === 0 ? (
+        <p className="py-8 text-center text-sm text-muted-foreground">这段时间没有历史数据</p>
+      ) : (
+        <div className="space-y-5">
+          <Panel title="CPU">
+            <ResponsiveContainer>
+              <AreaChart data={metricRows}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
+                <XAxis {...timeAxis(metricRows)} />
+                <YAxis domain={[0, tops.cpu]} ticks={quarters(tops.cpu)} unit="%" width={Y_WIDTH} {...AXIS} />
+                <Tooltip
+                  labelFormatter={(ts) => new Date(Number(ts)).toLocaleString("zh-CN")}
+                  formatter={(v) => [`${Number(v).toFixed(1)}%`, "CPU"]}
+                  contentStyle={{ fontSize: 12 }}
+                />
+                <Area dataKey="cpu" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.15} {...SERIES} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          <Panel title={`内存 · ${bytes(node.mem_total)}`}>
+            <ResponsiveContainer>
+              <AreaChart data={metricRows}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
+                <XAxis {...timeAxis(metricRows)} />
+                <YAxis domain={[0, node.mem_total]} ticks={quarters(node.mem_total)} tickFormatter={axisBytes} width={Y_WIDTH} {...AXIS} />
+                <Tooltip
+                  labelFormatter={(ts) => new Date(Number(ts)).toLocaleString("zh-CN")}
+                  formatter={(v) => bytes(Number(v))}
+                  contentStyle={{ fontSize: 12 }}
+                />
+                <Area dataKey="mem_used" name="内存" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.15} {...SERIES} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          <Panel title="网络速率">
+            <ResponsiveContainer>
+              <LineChart data={metricRows}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
+                <XAxis {...timeAxis(metricRows)} />
+                <YAxis domain={[0, tops.rate]} ticks={quarters(tops.rate)} tickFormatter={axisBytes} unit="/s" width={Y_WIDTH} {...AXIS} />
+                <Tooltip
+                  labelFormatter={(ts) => new Date(Number(ts)).toLocaleString("zh-CN")}
+                  formatter={(v) => rate(Number(v))}
+                  contentStyle={{ fontSize: 12 }}
+                />
+                <Line dataKey="net_rx" name="下行" stroke="#22c55e" {...SERIES} />
+                <Line dataKey="net_tx" name="上行" stroke="#3b82f6" {...SERIES} />
+              </LineChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          <Panel title={`硬盘 · ${bytes(node.disk_total)}`}>
+            <ResponsiveContainer>
+              <AreaChart data={metricRows}>
+                <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
+                <XAxis {...timeAxis(metricRows)} />
+                <YAxis domain={[0, node.disk_total]} ticks={quarters(node.disk_total)} tickFormatter={axisBytes} width={Y_WIDTH} {...AXIS} />
+                <Tooltip
+                  labelFormatter={(ts) => new Date(Number(ts)).toLocaleString("zh-CN")}
+                  formatter={(v) => bytes(Number(v))}
+                  contentStyle={{ fontSize: 12 }}
+                />
+                <Area dataKey="disk_used" name="硬盘" stroke="#f97316" fill="#f97316" fillOpacity={0.15} {...SERIES} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </Panel>
+        </div>
+      )}
     </div>
   )
 }
