@@ -1,125 +1,36 @@
-import { useEffect, useState } from "react"
-import { Activity, ArrowDown, ArrowUp, ArrowDownUp, Server, Gauge } from "lucide-react"
-
+import { Globe2, Radio, Server, Activity } from "lucide-react"
 import { speedHistory, type Node } from "@/lib/api"
 import { bytes, rate } from "@/lib/format"
-import { cn } from "@/lib/utils"
-
-type Stat = {
-  icon: React.ReactNode
-  label: string
-  right: React.ReactNode
-}
 
 export function Summary({ nodes }: { nodes: Node[] }) {
   const online = nodes.filter((n) => n.online)
-  const offline = nodes.length - online.length
-
-  const busiest = online.reduce<Node | null>(
-    (top, n) => (n.metrics && (!top || n.metrics.cpu > top.metrics!.cpu) ? n : top),
-    null,
-  )
-  const cpu = busiest?.metrics?.cpu ?? 0
-
+  const regions = new Set(nodes.map((n) => n.country).filter(Boolean)).size
   const totalRx = nodes.reduce((s, n) => s + n.total_rx, 0)
   const totalTx = nodes.reduce((s, n) => s + n.total_tx, 0)
   const now = speedHistory.at(-1) ?? { rx: 0, tx: 0 }
-
-  const stats: Stat[] = [
-    {
-      icon: <Gauge className="size-4 text-muted-foreground" />,
-      label: "实时网速",
-      right: (
-        <span className="tnum flex items-center gap-3 text-sm font-semibold">
-          <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
-            <ArrowDown className="size-3.5" />{rate(now.rx)}
-          </span>
-          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-            <ArrowUp className="size-3.5" />{rate(now.tx)}
-          </span>
-        </span>
-      ),
-    },
-    {
-      icon: <Server className="size-4 text-muted-foreground" />,
-      label: "节点",
-      right: (
-        <span className="tnum text-sm font-semibold">
-          {online.length} / {nodes.length}
-          <span className="ml-2 text-xs font-normal text-muted-foreground">
-            {offline > 0 ? `${offline} 离线` : "全部在线"}
-          </span>
-        </span>
-      ),
-    },
-    {
-      icon: <Activity className="size-4 text-muted-foreground" />,
-      label: "最忙节点",
-      right: (
-        <span className="tnum text-sm font-semibold">
-          {cpu.toFixed(1)}%
-          {busiest && <span className="ml-2 truncate text-xs font-normal text-muted-foreground">{busiest.name}</span>}
-        </span>
-      ),
-    },
-    {
-      icon: <ArrowDownUp className="size-4 text-muted-foreground" />,
-      label: "总流量",
-      right: (
-        <span className="tnum flex items-center gap-3 text-sm font-semibold">
-          <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
-            <ArrowDown className="size-3.5" />{bytes(totalRx)}
-          </span>
-          <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-            <ArrowUp className="size-3.5" />{bytes(totalTx)}
-          </span>
-        </span>
-      ),
-    },
+  const stats = [
+    { icon: <Server />, label: "在线", value: `${online.length} / ${nodes.length}`, sub: "节点" },
+    { icon: <Globe2 />, label: "地区", value: String(regions), sub: "个地区" },
+    { icon: <Radio />, label: "实时网速", value: `${rate(now.tx)} / ${rate(now.rx)}`, sub: "↑ 上行 · ↓ 下行" },
+    { icon: <Activity />, label: "总流量", value: `${bytes(totalTx)} / ${bytes(totalRx)}`, sub: "↑ 上行 · ↓ 下行" },
   ]
-
-  const StatCard = ({ s, className }: { s: Stat; className?: string }) => (
-    <div className={cn("flex items-center gap-3 rounded-xl border bg-card px-4 py-3", className)}>
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/50">
-        {s.icon}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="text-xs text-muted-foreground">{s.label}</div>
-      </div>
-      <div className="shrink-0">{s.right}</div>
-    </div>
-  )
-
-  const [idx, setIdx] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => setIdx((i) => (i + 1) % stats.length), 3000)
-    return () => clearInterval(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   return (
-    <section>
-      <div className="mb-4 flex items-end justify-between gap-3">
+    <section className="flow-overview">
+      <div className="mb-5 flex items-end justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-sky-600 dark:text-sky-400">Overview</p>
-          <h1 className="mt-1 text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100 sm:text-2xl">节点状态</h1>
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-600 dark:text-sky-400">Status overview</p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-3xl">服务器状态</h1>
         </div>
-        <p className="hidden text-right text-xs text-muted-foreground sm:block">数据每 2 秒自动更新</p>
+        <p className="hidden text-xs text-slate-400 sm:block">实时数据 · 自动刷新</p>
       </div>
-      <div className="hidden grid-cols-2 gap-3 md:grid lg:grid-cols-4">
-        {stats.map((s, i) => <StatCard key={i} s={s} />)}
-      </div>
-
-      <div className="relative h-[68px] select-none md:hidden" style={{ touchAction: "none" }}>
-        {stats.map((s, i) => (
-          <div
-            key={i}
-            className={cn(
-              "absolute inset-0 transition-opacity duration-500",
-              i === idx ? "opacity-100" : "opacity-0",
-            )}
-          >
-            <StatCard s={s} className="h-full border-0 rounded-xl" />
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-slate-200 bg-slate-200 shadow-sm dark:border-slate-800 dark:bg-slate-800 lg:grid-cols-4">
+        {stats.map((s) => (
+          <div key={s.label} className="bg-white px-4 py-4 dark:bg-slate-900 sm:px-5">
+            <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <span className="text-sky-500 [&>svg]:size-4">{s.icon}</span>{s.label}
+            </div>
+            <div className="mt-2 truncate text-lg font-bold tracking-tight text-slate-900 dark:text-white sm:text-xl">{s.value}</div>
+            <div className="mt-1 text-[10px] text-slate-400">{s.sub}</div>
           </div>
         ))}
       </div>
